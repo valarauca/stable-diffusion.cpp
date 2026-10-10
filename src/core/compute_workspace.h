@@ -22,7 +22,12 @@ namespace sd {
         size_t scheduler_capacity_      = 0;
         std::vector<uint64_t> reservation_;
         bool active_         = false;
+        bool async_          = false;
+        bool in_flight_      = false;
         size_t reservations_ = 0;
+
+        void drain();
+        bool reservation_fits(ggml_cgraph* graph) const;
 
         ggml_backend_sched_t make_scheduler(size_t graph_size);
         bool needs_scheduler(ggml_cgraph* graph) const;
@@ -51,6 +56,9 @@ namespace sd {
             const std::function<ggml_backend_t(const ggml_tensor*)>& external_backend,
             const AssignNodes& assign_nodes);
         void synchronize() const;
+        // Async segments end without waiting for the backend. The workspace still waits before it
+        // frees or re-reserves buffers that submitted work may be using.
+        void set_async(bool async);
         bool segment_end() noexcept;
         bool release();
         bool active() const { return active_; }

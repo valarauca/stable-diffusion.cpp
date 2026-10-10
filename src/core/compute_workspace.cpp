@@ -80,6 +80,28 @@ namespace sd {
         return true;
     }
 
+    void ComputeWorkspace::drain() {
+        if (in_flight_) {
+            in_flight_ = false;
+            synchronize();
+        }
+    }
+
+    bool ComputeWorkspace::reservation_fits(ggml_cgraph* graph) const {
+        ggml_gallocr_t probe = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend_));
+        size_t size          = 0;
+        ggml_gallocr_reserve_n_size(probe, graph, nullptr, nullptr, &size);
+        ggml_gallocr_free(probe);
+        return size <= ggml_gallocr_get_buffer_size(allocator_, 0);
+    }
+
+    void ComputeWorkspace::set_async(bool async) {
+        async_ = async;
+        if (!async_) {
+            drain();
+        }
+    }
+
     bool ComputeWorkspace::release_excess(const Measurement& measurement) {
         return std::any_of(measurement.buffers.begin(), measurement.buffers.end(),
                            [&](const BackendBufferSize& size) { return bytes(size.backend) > size.bytes; }) &&
@@ -90,6 +112,7 @@ namespace sd {
         GGML_ASSERT(!active_);
         const bool use_scheduler = needs_scheduler(graph);
         if (use_scheduler) {
+            drain();
             if (allocator_ != nullptr) {
                 release();
             }
@@ -118,6 +141,9 @@ namespace sd {
             }
             auto signature = ggml_graph_cut::graph_layout(graph, true);
             if (signature != reservation_) {
+                if (in_flight_ && !reservation_fits(graph)) {
+                    drain();
+                }
                 if (!ggml_gallocr_reserve(allocator_, graph)) {
                     release();
                     return false;
@@ -236,6 +262,10 @@ namespace sd {
         }
         // Outer cleanup guards must not retry a failed backend submission.
         active_ = false;
+        if (async_) {
+            in_flight_ = true;
+            return true;
+        }
         try {
             synchronize();
             return true;
@@ -253,6 +283,7 @@ namespace sd {
         if (active_) {
             return false;
         }
+        drain();
         ggml_gallocr_free(allocator_);
         allocator_ = nullptr;
         ggml_backend_sched_free(scheduler_);

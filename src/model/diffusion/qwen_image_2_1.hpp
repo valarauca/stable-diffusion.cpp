@@ -1,6 +1,7 @@
 #ifndef __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_H__
 #define __SD_MODEL_DIFFUSION_QWEN_IMAGE_2_1_H__
 
+#include "core/step_timing.h"
 #include "model/diffusion/qwen_image.hpp"
 
 namespace Qwen {
@@ -452,6 +453,8 @@ namespace Qwen {
             return true;
         }
 
+        bool supports_device_io() const override { return true; }
+
         sd::Tensor<float> compute(int n_threads, const DiffusionParams& inputs) override {
             const auto& x       = tensor_or_empty(inputs.x);
             const auto& context = tensor_or_empty(inputs.context);
@@ -506,18 +509,44 @@ namespace Qwen {
                 }
                 const bool cached         = active_cache.mode == QwenImage21PrefixCache::Mode::REUSE;
                 const auto first_position = layout.positions.begin() + (cached ? layout.prefix_length : 0);
-                Rope::Embedding embedding;
-                embedding.ids.assign(first_position, layout.positions.end());
-                const size_t offset             = cached ? static_cast<size_t>(layout.prefix_length) : 0;
-                embedding.positions.token_count = embedding.ids.size();
-                for (auto region : layout.rope_layout.images) {
-                    if (region.begin >= offset) {
-                        region.begin -= offset;
-                        embedding.positions.images.push_back(region);
+                const int64_t pe_tokens    = static_cast<int64_t>(layout.positions.size()) - (cached ? layout.prefix_length : 0);
+                std::string pe_key;
+                ggml_tensor* pe_constant = nullptr;
+                if (device_inputs_ != nullptr) {
+                    uint64_t pe_hash = 1469598103934665603ULL;
+                    auto mix         = [&](const void* data, size_t size) {
+                        const auto* bytes = static_cast<const unsigned char*>(data);
+                        for (size_t i = 0; i < size; ++i) {
+                            pe_hash = (pe_hash ^ bytes[i]) * 1099511628211ULL;
+                        }
+                    };
+                    for (auto it = first_position; it != layout.positions.end(); ++it) {
+                        mix(it->data(), it->size() * sizeof(float));
                     }
+                    for (const auto& region : layout.rope_layout.images) {
+                        const double fields[] = {static_cast<double>(region.begin), static_cast<double>(region.count),
+                                                 region.height_period, region.width_period,
+                                                 static_cast<double>(region.height_axis), static_cast<double>(region.width_axis)};
+                        mix(fields, sizeof(fields));
+                    }
+                    pe_key      = "qwen_image_2_1.pe." + std::to_string(cached) + "." + std::to_string(pe_tokens) + "." + std::to_string(pe_hash);
+                    pe_constant = device_inputs_->find_constant(pe_key);
                 }
-                embedding.values = Rope::embed_nd(embedding.ids, 1, 10000.f, config.axes_dim, embedding.layout, &embedding.frequencies);
-                pe_data          = finish_rope_pe(std::move(embedding));
+                const int64_t inputs_start = sd::step_timing::now();
+                if (pe_constant == nullptr) {
+                    Rope::Embedding embedding;
+                    embedding.ids.assign(first_position, layout.positions.end());
+                    const size_t offset             = cached ? static_cast<size_t>(layout.prefix_length) : 0;
+                    embedding.positions.token_count = embedding.ids.size();
+                    for (auto region : layout.rope_layout.images) {
+                        if (region.begin >= offset) {
+                            region.begin -= offset;
+                            embedding.positions.images.push_back(region);
+                        }
+                    }
+                    embedding.values = Rope::embed_nd(embedding.ids, 1, 10000.f, config.axes_dim, embedding.layout, &embedding.frequencies);
+                    pe_data          = finish_rope_pe(std::move(embedding));
+                }
                 mask_data.clear();
                 if (!cached) {
                     for (const auto& segment : layout.segments) {
@@ -533,22 +562,27 @@ namespace Qwen {
                         mask_data.push_back(std::move(mask));
                     }
                 }
+                sd::step_timing::add_since(sd::step_timing::HOST_INPUTS, inputs_start);
                 auto build = [&]() {
                     auto graph = new_graph_custom(QWEN_IMAGE_GRAPH_SIZE * 2);
-                    auto pe    = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, config.head_dim / 2,
-                                                                layout.positions.size() - (cached ? layout.prefix_length : 0));
-                    set_backend_tensor_data(pe, pe_data.data());
+                    ggml_tensor* pe = pe_constant;
+                    if (pe == nullptr && device_inputs_ != nullptr) {
+                        pe = device_inputs_->constant(pe_key, GGML_TYPE_F32, {2, 2, config.head_dim / 2, pe_tokens}, pe_data.data());
+                    } else if (pe == nullptr) {
+                        pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, config.head_dim / 2, pe_tokens);
+                        set_backend_tensor_data(pe, pe_data.data());
+                    }
                     std::vector<ggml_tensor*> masks, ref_inputs;
                     for (const auto& mask : mask_data) {
                         masks.push_back(mask.empty() ? nullptr : make_input(mask));
                     }
                     if (!cached) {
                         for (const auto& ref : refs) {
-                            ref_inputs.push_back(make_input(ref));
+                            ref_inputs.push_back(make_run_constant(ref));
                         }
                     }
                     auto ctx = get_context(graph);
-                    auto out = model.forward(&ctx, make_input(x), make_input(*inputs.timesteps), cached ? nullptr : make_input(context),
+                    auto out = model.forward(&ctx, make_x_input(x), make_step_input(*inputs.timesteps), cached ? nullptr : make_run_constant(context),
                                                          ref_inputs, pe, layout, masks, checked_cache);
                     if (!flash_attn_used) {
                         return static_cast<ggml_cgraph*>(nullptr);

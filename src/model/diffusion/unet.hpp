@@ -781,12 +781,12 @@ struct UNetModelRunner : public DiffusionModelRunner {
                              float ip_scale                                        = 1.f) {
         ggml_cgraph* gf = new_graph_custom(UNET_GRAPH_SIZE);
 
-        ggml_tensor* x          = make_input(x_tensor);
-        ggml_tensor* timesteps  = make_input(timesteps_tensor);
-        ggml_tensor* context    = make_optional_input(context_tensor);
-        ggml_tensor* c_concat   = make_optional_input(c_concat_tensor);
-        ggml_tensor* y          = make_optional_input(y_tensor);
-        ggml_tensor* ip_context = make_optional_input(ip_context_tensor);
+        ggml_tensor* x          = make_x_input(x_tensor);
+        ggml_tensor* timesteps  = make_step_input(timesteps_tensor);
+        ggml_tensor* context    = make_run_constant(context_tensor);
+        ggml_tensor* c_concat   = make_run_constant(c_concat_tensor);
+        ggml_tensor* y          = make_run_constant(y_tensor);
+        ggml_tensor* ip_context = make_run_constant(ip_context_tensor);
         std::vector<ggml_tensor*> controls;
         controls.reserve(controls_tensor.size());
         for (const auto& control_tensor : controls_tensor) {
@@ -838,6 +838,8 @@ struct UNetModelRunner : public DiffusionModelRunner {
 
         return restore_trailing_singleton_dims(GGMLRunner::compute(get_graph, n_threads, false), x.dim());
     }
+
+    bool supports_device_io() const override { return true; }
 
     sd::Tensor<float> compute(int n_threads,
                               const DiffusionParams& diffusion_params) override {

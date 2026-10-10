@@ -23,6 +23,8 @@
 #include "core/rng.hpp"
 #include "core/rng_mt19937.hpp"
 #include "core/rng_philox.hpp"
+#include "core/step_timing.h"
+#include "runtime/gpu_sampler.h"
 #include "core/util.h"
 #include "model_builders.h"
 #include "model_loader.h"
@@ -2388,11 +2390,66 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                                                         : sampling_init_latent;
     sd::Tensor<float> denoised                    = x_t;
 
+    std::unique_ptr<sd::GpuSampler> gpu_sampler;
+    bool gpu_resident = false;
+    for (const auto& [key, value] : parse_key_value_args(extra_sample_args, "extra sample arg")) {
+        if (key != "gpu_sampler" || value == "0" || value == "off") {
+            continue;
+        }
+        const bool io_only = value == "io";
+        const char* reason = nullptr;
+        if (!io_only && method != EULER_SAMPLE_METHOD && method != EULER_A_SAMPLE_METHOD) {
+            reason = "only euler and euler_a are supported";
+        } else if (std::dynamic_pointer_cast<SefiFlowDenoiser>(denoiser)) {
+            reason = "SeFi sampling";
+        } else if (use_apg_guidance || has_skiplayer || needs_uncond_denoised) {
+            reason = "only classifier-free guidance is supported";
+        } else if (cache_runtime.mode != sd_sample::SampleCacheMode::NONE || cache_runtime.spectrum_enabled) {
+            reason = "step caches are enabled";
+        } else if (!control_image.empty()) {
+            reason = "ControlNet is enabled";
+        } else if (std::any_of(generation_extensions.begin(), generation_extensions.end(),
+                               [](const auto& extension) { return extension->is_enabled(); })) {
+            reason = "generation extensions are enabled";
+        } else if (preview.callback != nullptr && preview.mode != PREVIEW_NONE) {
+            reason = "latent preview is enabled";
+        } else if (!work_diffusion_model->supports_device_io()) {
+            reason = "the diffusion model does not support device I/O";
+        } else if (work_diffusion_model->device_io_backend() == nullptr) {
+            reason = "the diffusion model spans several devices";
+        }
+        if (reason != nullptr) {
+            LOG_WARN("gpu_sampler disabled: %s", reason);
+            break;
+        }
+        gpu_sampler = std::make_unique<sd::GpuSampler>(work_diffusion_model->device_io_backend(), x_t,
+                                                       !io_only && apply_denoise_mask, static_cast<int>(steps));
+        if (!gpu_sampler->ok()) {
+            gpu_sampler.reset();
+            break;
+        }
+        gpu_resident = !io_only;
+        if (gpu_resident && apply_denoise_mask) {
+            gpu_sampler->upload_mask(sd::Tensor<float>(x_t.shape()) + denoise_mask, sampling_init_latent);
+        }
+        LOG_INFO("gpu_sampler: %s on %s", gpu_resident ? "latent resident" : "device I/O only",
+                 ggml_backend_name(work_diffusion_model->device_io_backend()));
+    }
+    std::array<float, 4> gpu_p_denoise = {1.f, 1.f, 1.f, 1.f};
+    bool gpu_has_uncond                = false;
+    bool gpu_has_img_uncond            = false;
+
     auto denoise = [&](const sd::Tensor<float>& x, float sigma, int step) -> sd::guidance::GuiderOutput {
         if (get_cancel_flag() == SD_CANCEL_ALL) {
             LOG_VERBOSE("cancelling generation");
             return {};
         }
+        sd::step_timing::step_begin(step);
+        struct StepTimingGuard {
+            ~StepTimingGuard() {
+                sd::step_timing::step_end();
+            }
+        } step_timing_guard;
 
         if (step == 1 || step == -1) {
             pretty_progress(0, (int)steps, 0);
@@ -2405,7 +2462,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
         float c_out  = scaling[1];
         float c_in   = scaling[2];
 
-        bool preview_needed = preview.callback != nullptr &&
+        bool preview_needed = !gpu_resident && preview.callback != nullptr &&
                               sd::preview::should_preview_sample_step(step,
                                                                       steps,
                                                                       terminal_sigma_is_zero,
@@ -2432,7 +2489,13 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
         if (sd_version_is_hunyuan_video(version) && step + 1 < sigmas.size()) {
             hunyuan_timestep_r_tensor = sd::Tensor<float>::from_vector({sigmas[step + 1]});
         }
-        sd::Tensor<float> noised_input = x * c_in;
+        if (gpu_sampler) {
+            if (!gpu_resident) {
+                gpu_sampler->upload_x(x);
+            }
+            gpu_sampler->set_c_in(c_in);
+        }
+        sd::Tensor<float> noised_input = gpu_resident ? x : x * c_in;
         if (apply_denoise_mask && (version == VERSION_WAN2_2_TI2V || sd_version_is_ltxav(version) || sd_version_is_lingbot_video(version))) {
             noised_input = noised_input * denoise_mask + sampling_init_latent * (1.0f - denoise_mask);
         }
@@ -2594,7 +2657,20 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                     }
                 }
             }
+            const sd::GpuSampler::Slot gpu_slot = &condition == &uncond       ? sd::GpuSampler::UNCOND
+                                                  : &condition == &img_uncond ? sd::GpuSampler::IMG_UNCOND
+                                                                              : sd::GpuSampler::COND;
+            if (gpu_sampler) {
+                work_diffusion_model->set_device_io(gpu_sampler->x(), gpu_sampler->c_in(), gpu_sampler->pred(gpu_slot),
+                                                    gpu_resident ? gpu_sampler.get() : nullptr);
+            }
             auto output_opt = work_diffusion_model->compute(n_threads, diffusion_params);
+            if (gpu_sampler && !gpu_resident) {
+                work_diffusion_model->set_device_io(nullptr, nullptr, nullptr);
+                if (!output_opt.empty()) {
+                    output_opt = gpu_sampler->download(gpu_sampler->pred(gpu_slot));
+                }
+            }
             if (output_opt.empty()) {
                 LOG_ERROR("diffusion model compute failed");
                 return sd::Tensor<float>();
@@ -2682,6 +2758,16 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                 step_cache.invalidate_condition(&img_uncond);
             }
         }
+        if (gpu_resident) {
+            gpu_p_denoise      = {c_skip, c_out, effective_guidance_scale, image_guidance_scale};
+            gpu_has_uncond     = !uncond_out.empty();
+            gpu_has_img_uncond = !img_uncond_out.empty();
+            report_sample_progress(step, steps, terminal_sigma_is_zero, &last_progress_us);
+            sd::guidance::GuiderOutput output;
+            output.pred = x;
+            return output;
+        }
+
         sd::guidance::GuidanceInput guidance_input;
         guidance_input.step            = step;
         guidance_input.schedule_size   = sigmas.size();
@@ -2733,7 +2819,47 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
         return output;
     };
 
-    auto x0_opt = sample_k_diffusion(method, denoise, x_t, sigmas, sampler_rng, eta, is_flow_denoiser, extra_sample_args, denoiser);
+    auto sample_gpu_resident = [&]() -> sd::Tensor<float> {
+        struct DeviceIOReset {
+            DiffusionModelRunner* runner;
+            ~DeviceIOReset() {
+                runner->set_device_io(nullptr, nullptr, nullptr);
+            }
+        } device_io_reset{work_diffusion_model.get()};
+        const bool ancestral = method == EULER_A_SAMPLE_METHOD;
+        const uint32_t seed  = ancestral ? sd::wang::seed_from_rng(sampler_rng) : 0;
+        gpu_sampler->upload_x(x_t);
+        for (size_t i = 0; i + 1 < sigmas.size(); ++i) {
+            const float sigma    = sigmas[i];
+            const float sigma_to = sigmas[i + 1];
+            if (!ancestral && sigma == sigma_to) {
+                continue;
+            }
+            if (denoise(x_t, sigma, static_cast<int>(i) + 1).pred.empty()) {
+                return {};
+            }
+            std::array<float, 6> p_step = {sigma, sigma_to, sigma_to, 0.f, 1.f, static_cast<float>(i)};
+            if (ancestral && sigma_to == 0.f) {
+                p_step[2] = 0.f;
+            } else if (ancestral && eta != 0.f) {
+                auto [sigma_down, sigma_up, alpha_scale] = get_ancestral_step(sigma, sigma_to, eta, is_flow_denoiser);
+                p_step[2]                                = sigma_down;
+                p_step[3]                                = sigma_up;
+                p_step[4]                                = is_flow_denoiser ? alpha_scale : 1.f;
+            }
+            if (!gpu_sampler->step(gpu_p_denoise, gpu_has_uncond, gpu_has_img_uncond, p_step,
+                                   ancestral ? GGML_SAMPLE_STEP_EULER_ANCESTRAL : GGML_SAMPLE_STEP_EULER, seed)) {
+                LOG_ERROR("gpu_sampler: step %zu failed", i + 1);
+                return {};
+            }
+        }
+        return gpu_sampler->download(gpu_sampler->x());
+    };
+
+    auto x0_opt = gpu_resident
+                      ? sample_gpu_resident()
+                      : sample_k_diffusion(method, denoise, x_t, sigmas, sampler_rng, eta, is_flow_denoiser, extra_sample_args, denoiser);
+    sd::step_timing::run_end();
     if (x0_opt.empty()) {
         LOG_ERROR("Diffusion model sampling failed");
         if (control_net) {
@@ -2743,6 +2869,12 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
     }
 
     auto x0 = std::move(x0_opt);
+    if (const char* dump_path = std::getenv("SD_DUMP_LATENT")) {
+        if (FILE* dump = std::fopen(dump_path, "wb")) {
+            std::fwrite(x0.data(), sizeof(float), static_cast<size_t>(x0.numel()), dump);
+            std::fclose(dump);
+        }
+    }
     sd_sample::log_sample_cache_summary(cache_runtime, steps);
     if (inverse_noise_scaling) {
         x0 = denoiser->inverse_noise_scaling(sigmas[sigmas.size() - 1], x0);

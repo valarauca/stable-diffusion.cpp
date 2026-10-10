@@ -115,6 +115,7 @@ namespace sd {
             return GGML_STATUS_SUCCESS;
         }
         const auto tensors = cache_graph_tensors(graph);
+        bool copied        = false;
         for (const auto& output : outputs_) {
             if (pending_.count(output.first) || !tensors.count(output.second)) {
                 continue;
@@ -126,8 +127,11 @@ namespace sd {
                 return status;
             }
             pending_[output.first] = std::move(entry);
+            copied                 = true;
         }
-        ggml_backend_synchronize(backend_);
+        if (copied) {
+            ggml_backend_synchronize(backend_);
+        }
         return GGML_STATUS_SUCCESS;
     }
 
@@ -207,8 +211,8 @@ namespace sd {
             ++copied_count;
             tensors_[output->name] = std::move(entry);
         }
-        ggml_backend_synchronize(backend_);
         if (copied_count > 0) {
+            ggml_backend_synchronize(backend_);
             LOG_DEBUG("%s graph cut cache added %6.2f MB (%zu tensors)",
                       log_desc, copied_bytes / (1024.f * 1024.f), copied_count);
         }

@@ -188,6 +188,15 @@ static inline const sd::Tensor<T>& tensor_or_empty(const sd::Tensor<T>* tensor) 
 struct DiffusionModelRunner : public GGMLRunner {
 protected:
     std::string prefix;
+    ggml_tensor* device_x_    = nullptr;
+    ggml_tensor* device_c_in_ = nullptr;
+
+    ggml_tensor* make_x_input(const sd::Tensor<float>& x) {
+        if (device_x_ == nullptr) {
+            return make_input(x);
+        }
+        return ggml_mul(compute_ctx, device_x_, device_scalar(compute_ctx, device_c_in_));
+    }
 
     std::vector<float> finish_rope_pe(Rope::Embedding embedding) {
         Rope::apply_circular(embedding, circular_x_enabled, circular_y_enabled);
@@ -203,6 +212,23 @@ public:
 
     virtual sd::Tensor<float> compute(int n_threads,
                                       const DiffusionParams& diffusion_params) = 0;
+
+    // Models that build their latent input through make_x_input can run with the latent and the
+    // prediction resident on the backend.
+    virtual bool supports_device_io() const { return false; }
+
+    // Backend that device I/O tensors must live on, or null when the runner spans several devices.
+    ggml_backend_t device_io_backend() const { return is_multi_device() ? nullptr : runtime_backend; }
+
+    // Read the model input as x * c_in from pre-allocated backend tensors and copy the prediction
+    // into out. With inputs, run constants and per-call scalars stay on the backend and computes do
+    // not wait for it. Null x restores host input, readback and synchronous computes.
+    void set_device_io(ggml_tensor* x, ggml_tensor* c_in, ggml_tensor* out, RunnerDeviceInputs* inputs = nullptr) {
+        device_x_    = x;
+        device_c_in_ = c_in;
+        set_device_output(x != nullptr ? out : nullptr);
+        set_device_inputs(x != nullptr ? inputs : nullptr);
+    }
 
     void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) {
         get_param_tensors(tensors, prefix);

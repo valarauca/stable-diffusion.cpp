@@ -14,6 +14,7 @@
 #include "core/rng.hpp"
 #include "core/rng_mt19937.hpp"
 #include "core/rng_philox.hpp"
+#include "core/rng_wang.hpp"
 #include "core/tensor.hpp"
 #include "core/util.h"
 #include "model.h"
@@ -2892,6 +2893,35 @@ private:
     std::vector<int64_t> shape;
 };
 
+// Stateless WangHash noise keyed by (seed, step, element). Matches the GPU-resident sampler's
+// GGML_OP_SAMPLE_STEP noise, where step is the index of sigma_from in the schedule.
+class WangNoiseSampler : public NoiseSampler {
+public:
+    WangNoiseSampler(const sd::Tensor<float>& x_template, const std::shared_ptr<RNG>& rng, const std::vector<float>& sigmas)
+        : seed(sd::wang::seed_from_rng(rng)), sigmas(sigmas), shape(x_template.shape()) {}
+    sd::Tensor<float> operator()(double sigma_from, double sigma_to) override {
+        (void)sigma_to;
+        uint32_t step = 0;
+        for (size_t i = 0; i < sigmas.size(); ++i) {
+            if (sigmas[i] == static_cast<float>(sigma_from)) {
+                step = static_cast<uint32_t>(i);
+                break;
+            }
+        }
+        sd::Tensor<float> noise(shape);
+        const uint32_t step_key = sd::wang::key(seed, step);
+        for (int64_t i = 0; i < noise.numel(); ++i) {
+            noise[i] = sd::wang::normal(step_key, static_cast<uint32_t>(i));
+        }
+        return noise;
+    }
+
+private:
+    uint32_t seed;
+    std::vector<float> sigmas;
+    std::vector<int64_t> shape;
+};
+
 // A fixed tree seed, shape and sigma range give consistent increments across
 // interval subdivisions. Each query returns normalized Gaussian noise.
 // Reference: torchsde BrownianTree; k-diffusion BatchedBrownianTree.
@@ -2989,6 +3019,7 @@ private:
 static std::unique_ptr<NoiseSampler> make_noise_sampler(const sd::Tensor<float>& x, std::shared_ptr<RNG> rng, sample_method_t method, const std::vector<float>& sigmas, const SamplerExtraArgs& extra_args) {
     bool brownian_tree            = (method == DPMPP2M_SDE_BT_SAMPLE_METHOD);
     bool def_brownian_tree        = brownian_tree;
+    bool wang                     = false;
     std::string brownian_tree_rng = "cpu";
 
     for (const auto& [key, value] : extra_args) {
@@ -2997,6 +3028,9 @@ static std::unique_ptr<NoiseSampler> make_noise_sampler(const sd::Tensor<float>&
                 brownian_tree = false;
             } else if (value == "brownian_tree") {
                 brownian_tree = true;
+            } else if (value == "wang") {
+                brownian_tree = false;
+                wang          = true;
             } else {
                 LOG_WARN("unknown noise_sampler value '%s'; using default", value.c_str());
             }
@@ -3037,6 +3071,10 @@ static std::unique_ptr<NoiseSampler> make_noise_sampler(const sd::Tensor<float>&
         }
     }
 
+    if (wang) {
+        LOG_INFO("setting noise sampler to stateless WangHash");
+        return std::make_unique<WangNoiseSampler>(x, rng, sigmas);
+    }
     if (def_brownian_tree) {
         LOG_INFO("setting noise sampler to independent and identically distributed (iid)");
     }
