@@ -26,8 +26,8 @@ namespace sd {
         bool in_flight_      = false;
         size_t reservations_ = 0;
 
-        void drain();
-        bool reservation_fits(ggml_cgraph* graph) const;
+        bool drain() noexcept;
+        bool synchronize_noexcept(const char* phase) const noexcept;
 
         ggml_backend_sched_t make_scheduler(size_t graph_size);
         bool needs_scheduler(ggml_cgraph* graph) const;

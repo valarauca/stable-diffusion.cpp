@@ -7,6 +7,17 @@
 
 namespace sd {
 
+    bool GpuSampler::supported(ggml_backend_t backend) {
+        ggml_context* ctx = ggml_init({ggml_tensor_overhead() * 6, nullptr, true});
+        ggml_tensor* x    = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 1);
+        ggml_tensor* p4   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 4);
+        ggml_tensor* p6   = ggml_new_tensor_1d(ctx, GGML_TYPE_F32, 6);
+        const bool ok     = ggml_backend_supports_op(backend, ggml_denoise(ctx, x, x, nullptr, nullptr, nullptr, nullptr, p4)) &&
+                            ggml_backend_supports_op(backend, ggml_sample_step(ctx, x, x, p6, GGML_SAMPLE_STEP_EULER_ANCESTRAL, 0));
+        ggml_free(ctx);
+        return ok;
+    }
+
     GpuSampler::GpuSampler(ggml_backend_t backend, const Tensor<float>& x, bool with_mask, int steps)
         : backend_(backend), shape_(x.shape()), slot_count_(8 * static_cast<int64_t>(steps) + 32) {
         ggml_init_params params = {ggml_tensor_overhead() * static_cast<size_t>(16 + slot_count_), nullptr, true};
@@ -84,15 +95,22 @@ namespace sd {
     }
 
     ggml_tensor* GpuSampler::constant(const std::string& key, ggml_type type, const std::vector<int64_t>& ne, const void* data) {
-        if (ggml_tensor* existing = find_constant(key)) {
-            return existing;
+        auto it = constants_.find(key);
+        if (it != constants_.end()) {
+            return it->second.tensor;
         }
         Constant entry;
         entry.ctx    = ggml_init({ggml_tensor_overhead(), nullptr, true});
         entry.tensor = ggml_new_tensor(entry.ctx, type, static_cast<int>(ne.size()), ne.data());
         ggml_set_name(entry.tensor, key.c_str());
         entry.buffer = ggml_backend_alloc_ctx_tensors(entry.ctx, backend_);
-        GGML_ASSERT(entry.buffer != nullptr);
+        if (entry.buffer == nullptr) {
+            LOG_WARN("gpu sampler: failed to allocate run constant '%s' (%.2f MB), using a per-call input",
+                     key.c_str(), ggml_nbytes(entry.tensor) / (1024.0 * 1024.0));
+            ggml_free(entry.ctx);
+            constants_[key] = Constant{};
+            return nullptr;
+        }
         ggml_backend_tensor_set(entry.tensor, data, 0, ggml_nbytes(entry.tensor));
         constants_[key] = entry;
         return entry.tensor;
@@ -118,6 +136,20 @@ namespace sd {
             ggml_backend_tensor_set(tensor, data, 0, static_cast<size_t>(n) * sizeof(float));
         }
         return tensor;
+    }
+
+    size_t GpuSampler::resident_bytes(ggml_backend_t backend) const {
+        if (backend != backend_) {
+            return 0;
+        }
+        size_t bytes = buffer_ != nullptr ? ggml_backend_buffer_get_size(buffer_) : 0;
+        for (const auto& entry : constants_) {
+            bytes += entry.second.buffer != nullptr ? ggml_backend_buffer_get_size(entry.second.buffer) : 0;
+        }
+        if (step_allocr_ != nullptr) {
+            bytes += ggml_gallocr_get_buffer_size(step_allocr_, 0);
+        }
+        return bytes;
     }
 
     bool GpuSampler::step(const std::array<float, 4>& p_denoise,

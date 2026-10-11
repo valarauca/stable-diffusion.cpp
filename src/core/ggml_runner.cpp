@@ -124,20 +124,17 @@ void GGMLRunner::evict_compute_backend_param_tensors(const std::vector<ggml_tens
 }
 
 void GGMLRunner::prepare_build_in_tensor_before() {
-    if (device_inputs_ != nullptr) {
-        one_tensor = ggml_view_tensor(compute_ctx, device_inputs_->constant("ggml_runner.one", GGML_TYPE_F32, {1}, one_vec.data()));
-        ggml_set_name(one_tensor, "ggml_runner_build_in_tensor:one");
-        zero_int_tensor = ggml_view_tensor(compute_ctx, device_inputs_->constant("ggml_runner.zero_int", GGML_TYPE_I32, {1}, zero_int_vec.data()));
-        ggml_set_name(zero_int_tensor, "ggml_runner_build_in_tensor:zero_int");
-        return;
-    }
-    one_tensor = ggml_new_tensor_1d(compute_ctx, GGML_TYPE_F32, 1);
-    ggml_set_name(one_tensor, "ggml_runner_build_in_tensor:one");
-    set_backend_tensor_data(one_tensor, one_vec.data());
-
-    zero_int_tensor = ggml_new_tensor_1d(compute_ctx, GGML_TYPE_I32, 1);
-    ggml_set_name(zero_int_tensor, "ggml_runner_build_in_tensor:zero_int");
-    set_backend_tensor_data(zero_int_tensor, zero_int_vec.data());
+    auto make = [&](const char* key, ggml_type type, const void* data, const char* name) {
+        ggml_tensor* constant = device_inputs_ != nullptr ? device_inputs_->constant(key, type, {1}, data) : nullptr;
+        ggml_tensor* tensor   = constant != nullptr ? ggml_view_tensor(compute_ctx, constant) : ggml_new_tensor_1d(compute_ctx, type, 1);
+        ggml_set_name(tensor, name);
+        if (constant == nullptr) {
+            set_backend_tensor_data(tensor, data);
+        }
+        return tensor;
+    };
+    one_tensor      = make("ggml_runner.one", GGML_TYPE_F32, one_vec.data(), "ggml_runner_build_in_tensor:one");
+    zero_int_tensor = make("ggml_runner.zero_int", GGML_TYPE_I32, zero_int_vec.data(), "ggml_runner_build_in_tensor:zero_int");
 }
 
 void GGMLRunner::prepare_build_in_tensor_after(ggml_cgraph* gf) {
@@ -162,7 +159,9 @@ ggml_cgraph* GGMLRunner::get_compute_graph(get_graph_cb_t get_graph) {
         auto result = ggml_graph_node(gf, -1);
         ggml_set_name(result, final_result_name.c_str());
         if (device_output_ != nullptr) {
-            ggml_build_forward_expand(gf, ggml_cpy(compute_ctx, result, device_output_));
+            ggml_tensor* copy = ggml_cpy(compute_ctx, result, device_output_);
+            ggml_set_output(copy);
+            ggml_build_forward_expand(gf, copy);
         }
     }
     for (const auto& entry : debug_tensors) {
@@ -255,6 +254,10 @@ size_t GGMLRunner::retained_runtime_buffer_bytes(ggml_backend_t backend) const {
         bytes                    = cache_bytes > SIZE_MAX - bytes ? SIZE_MAX : bytes + cache_bytes;
         const size_t cut_bytes   = cut_cache_.resident_bytes(ggml_backend_get_device(backend));
         bytes                    = cut_bytes > SIZE_MAX - bytes ? SIZE_MAX : bytes + cut_bytes;
+    }
+    if (device_inputs_ != nullptr) {
+        const size_t input_bytes = device_inputs_->resident_bytes(backend);
+        bytes                    = input_bytes > SIZE_MAX - bytes ? SIZE_MAX : bytes + input_bytes;
     }
     return bytes;
 }
@@ -791,14 +794,14 @@ bool GGMLRunner::execute_segment(ggml_cgraph* graph, int n_threads) {
             multi_device_eval_callback_warned = true;
         }
         status = ggml_backend_sched_graph_compute(scheduler, graph);
-    } else if (device_inputs_ != nullptr && debug_tensors.empty() && sd_get_backend_eval_callback() == nullptr) {
+    } else if (async_compute_) {
         status = ggml_backend_graph_compute_async(runtime_backend, graph);
     } else {
         status = sd_backend_graph_compute_with_eval_callback(runtime_backend, graph,
                                                              sd_get_backend_eval_callback(),
                                                              sd_get_backend_eval_callback_data());
     }
-    if (device_inputs_ == nullptr || !debug_tensors.empty()) {
+    if (!async_compute_) {
         workspace_.synchronize();
     }
     if (status != GGML_STATUS_SUCCESS) {
@@ -874,6 +877,9 @@ std::optional<Tensor<float>> GGMLRunner::execute_graph(ggml_cgraph* graph, int n
                            manager != nullptr && manager->segmented_compute_enabled() &&
                            cached_plan.valid && cached_plan.has_cuts && cached_plan.segments.size() > 1 &&
                            !fits_monolithic();
+    async_compute_ = device_inputs_ != nullptr && !segmented && debug_tensors.empty() &&
+                     sd_get_backend_eval_callback() == nullptr;
+    workspace_.set_async(async_compute_);
     ggml_graph_cut::Plan monolithic_plan;
     if (!segmented) {
         monolithic_plan.segments.emplace_back();
@@ -1016,7 +1022,7 @@ std::optional<Tensor<float>> GGMLRunner::execute_graph(ggml_cgraph* graph, int n
         }
         sd::step_timing::add_since(sd::step_timing::COMPUTE, compute_start);
         const int64_t capture_start = sd::step_timing::now();
-        if (device_inputs_ != nullptr && cache_.pending_bytes(segment_graph) > 0) {
+        if (async_compute_ && cache_.pending_bytes(segment_graph) > 0) {
             workspace_.synchronize();
         }
         auto cache_status = cache_.capture(segment_graph);

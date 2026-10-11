@@ -29,6 +29,9 @@ namespace sd {
             SLOT_COUNT,
         };
 
+        // True when backend runs GGML_OP_DENOISE and GGML_OP_SAMPLE_STEP.
+        static bool supported(ggml_backend_t backend);
+
         GpuSampler(ggml_backend_t backend, const Tensor<float>& x, bool with_mask, int steps);
         ~GpuSampler() override;
         GpuSampler(const GpuSampler&)            = delete;
@@ -57,6 +60,7 @@ namespace sd {
         ggml_tensor* constant(const std::string& key, ggml_type type, const std::vector<int64_t>& ne, const void* data) override;
         ggml_tensor* find_constant(const std::string& key) override;
         ggml_tensor* scalar(const std::vector<int64_t>& ne, const float* data) override;
+        size_t resident_bytes(ggml_backend_t backend) const override;
 
     private:
         static constexpr int64_t kSlotFloats = 16;

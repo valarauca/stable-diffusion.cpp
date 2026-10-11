@@ -140,7 +140,8 @@ class RunnerDeviceInputs {
 public:
     virtual ~RunnerDeviceInputs() = default;
 
-    // Tensor holding data for the rest of the run, uploaded on first use of key.
+    // Tensor holding data for the rest of the run, uploaded on first use of key. Null when it cannot be
+    // allocated, in which case the caller falls back to a per-call input.
     virtual ggml_tensor* constant(const std::string& key, ggml_type type, const std::vector<int64_t>& ne, const void* data) = 0;
 
     // Tensor previously created for key, or null.
@@ -150,6 +151,9 @@ public:
     // slot may live in host memory the device reads directly, so graphs should pull it on-device
     // once (see device_scalar) instead of broadcasting from it.
     virtual ggml_tensor* scalar(const std::vector<int64_t>& ne, const float* data) = 0;
+
+    // Bytes these inputs hold on backend, counted as part of the runner's runtime residency.
+    virtual size_t resident_bytes(ggml_backend_t backend) const = 0;
 };
 
 struct GGMLRunner {
@@ -180,16 +184,10 @@ protected:
     ggml_context* compute_ctx          = nullptr;
     ggml_tensor* device_output_        = nullptr;
     RunnerDeviceInputs* device_inputs_ = nullptr;
-    bool runner_started_               = false;
-    bool graph_active_                 = false;
-
-    static std::vector<int64_t> input_ne(const std::vector<int64_t>& shape) {
-        std::vector<int64_t> ne(shape.begin(), shape.begin() + std::min<size_t>(shape.size(), GGML_MAX_DIMS));
-        if (shape.size() == 5) {
-            ne[3] *= shape[4];
-        }
-        return ne;
-    }
+    // Chosen per compute. Segmented plans stay synchronous because cut tensors are freed between segments.
+    bool async_compute_  = false;
+    bool runner_started_ = false;
+    bool graph_active_   = false;
 
     size_t max_graph_vram_bytes        = 0;
     bool graph_cut_layer_split_enabled = false;
@@ -342,7 +340,9 @@ public:
         return input;
     }
 
-    // Input that stays constant for the whole run. With device inputs it is uploaded once and reused.
+    // Input that stays constant for the whole run. With device inputs it is uploaded once and reused,
+    // keyed by its host address, so the host tensor must stay alive and unchanged until the inputs are
+    // detached.
     template <typename T>
     ggml_tensor* make_run_constant(const sd::Tensor<T>& tensor) {
         if (tensor.empty()) {
@@ -351,8 +351,13 @@ public:
         if (device_inputs_ == nullptr) {
             return make_input(tensor);
         }
-        const std::string key = sd_format("host:%p:%lld", (const void*)tensor.data(), (long long)tensor.numel());
-        return device_inputs_->constant(key, sd::GGMLTypeTraits<T>::type, input_ne(tensor.shape()), tensor.data());
+        const auto ne   = sd::ggml_ne_from_shape(tensor.shape());
+        std::string key = sd_format("host:%p:%s", (const void*)tensor.data(), ggml_type_name(sd::GGMLTypeTraits<T>::type));
+        for (int64_t n : ne) {
+            key += sd_format(":%lld", (long long)n);
+        }
+        ggml_tensor* constant = device_inputs_->constant(key, sd::GGMLTypeTraits<T>::type, ne, tensor.data());
+        return constant != nullptr ? constant : make_input(tensor);
     }
 
     // Small input that changes every call, such as timesteps. With device inputs it is uploaded asynchronously.
@@ -360,7 +365,7 @@ public:
         if (device_inputs_ == nullptr) {
             return make_input(tensor);
         }
-        return device_scalar(compute_ctx, device_inputs_->scalar(input_ne(tensor.shape()), tensor.data()));
+        return device_scalar(compute_ctx, device_inputs_->scalar(sd::ggml_ne_from_shape(tensor.shape()), tensor.data()));
     }
 
     // Copies a scalar slot into the compute buffer with a kernel, so consumers read device memory
@@ -408,8 +413,14 @@ public:
     // Route run constants, per-call scalars and the built-in tensors through inputs, and let computes
     // return without waiting for the backend. Null restores host inputs and synchronous computes.
     void set_device_inputs(RunnerDeviceInputs* inputs) {
+        if (device_inputs_ == inputs) {
+            return;
+        }
         device_inputs_ = inputs;
-        workspace_.set_async(inputs != nullptr);
+        if (inputs == nullptr) {
+            workspace_.set_async(false);
+        }
+        sync_runtime_residency();
     }
 
     void set_flash_attention_enabled(bool enabled) {

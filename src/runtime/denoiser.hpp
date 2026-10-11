@@ -2894,19 +2894,24 @@ private:
 };
 
 // Stateless WangHash noise keyed by (seed, step, element). Matches the GPU-resident sampler's
-// GGML_OP_SAMPLE_STEP noise, where step is the index of sigma_from in the schedule.
+// GGML_OP_SAMPLE_STEP noise, where step is the schedule index i of the (sigmas[i], sigmas[i + 1])
+// interval. Intervals are matched in order, so repeated sigmas get distinct steps, and a query that
+// matches no interval draws from a step past the end of the schedule.
 class WangNoiseSampler : public NoiseSampler {
 public:
     WangNoiseSampler(const sd::Tensor<float>& x_template, const std::shared_ptr<RNG>& rng, const std::vector<float>& sigmas)
         : seed(sd::wang::seed_from_rng(rng)), sigmas(sigmas), shape(x_template.shape()) {}
     sd::Tensor<float> operator()(double sigma_from, double sigma_to) override {
-        (void)sigma_to;
-        uint32_t step = 0;
-        for (size_t i = 0; i < sigmas.size(); ++i) {
-            if (sigmas[i] == static_cast<float>(sigma_from)) {
-                step = static_cast<uint32_t>(i);
+        uint32_t step = static_cast<uint32_t>(sigmas.size() + unmatched);
+        for (size_t i = next_step; i + 1 < sigmas.size(); ++i) {
+            if (sigmas[i] == static_cast<float>(sigma_from) && sigmas[i + 1] == static_cast<float>(sigma_to)) {
+                step      = static_cast<uint32_t>(i);
+                next_step = i + 1;
                 break;
             }
+        }
+        if (step >= sigmas.size()) {
+            ++unmatched;
         }
         sd::Tensor<float> noise(shape);
         const uint32_t step_key = sd::wang::key(seed, step);
@@ -2920,6 +2925,8 @@ private:
     uint32_t seed;
     std::vector<float> sigmas;
     std::vector<int64_t> shape;
+    size_t next_step = 0;
+    size_t unmatched = 0;
 };
 
 // A fixed tree seed, shape and sigma range give consistent increments across

@@ -568,7 +568,8 @@ namespace Qwen {
                     ggml_tensor* pe = pe_constant;
                     if (pe == nullptr && device_inputs_ != nullptr) {
                         pe = device_inputs_->constant(pe_key, GGML_TYPE_F32, {2, 2, config.head_dim / 2, pe_tokens}, pe_data.data());
-                    } else if (pe == nullptr) {
+                    }
+                    if (pe == nullptr) {
                         pe = ggml_new_tensor_4d(compute_ctx, GGML_TYPE_F32, 2, 2, config.head_dim / 2, pe_tokens);
                         set_backend_tensor_data(pe, pe_data.data());
                     }

@@ -1146,6 +1146,7 @@ void ModelManager::free_compute_staging_block(ComputeStagingBlock& block) {
     block.staged_tensors.clear();
 }
 
+// Unforced releases evict blocks mid-run, so they wait for async computes that may still read them.
 void ModelManager::release_compute_staging_blocks(bool force,
                                                   const std::unordered_set<TensorState*>* target_states) {
     struct ReleaseStats {
@@ -1174,6 +1175,9 @@ void ModelManager::release_compute_staging_blocks(bool force,
         }
 
         if (can_release) {
+            if (!force && block->compute_backend != nullptr) {
+                ggml_backend_synchronize(block->compute_backend);
+            }
             if (block->buffer != nullptr) {
                 auto& stats = released[block->compute_backend];
                 stats.bytes += ggml_backend_buffer_get_size(block->buffer);
@@ -1215,6 +1219,7 @@ void ModelManager::free_params_storage_block(ParamsStorageBlock& block) {
     block.states.clear();
 }
 
+// Unforced releases evict blocks mid-run, so they wait for async computes that may still read them.
 void ModelManager::release_params_storage_blocks(bool force,
                                                  const std::unordered_set<TensorState*>* target_states) {
     struct ReleaseStats {
@@ -1244,6 +1249,15 @@ void ModelManager::release_params_storage_blocks(bool force,
         }
 
         if (can_release) {
+            if (!force) {
+                ggml_backend_t synced = nullptr;
+                for (TensorState* state : block->states) {
+                    if (state != nullptr && state->compute_backend != nullptr && state->compute_backend != synced) {
+                        synced = state->compute_backend;
+                        ggml_backend_synchronize(synced);
+                    }
+                }
+            }
             if (block->buffer != nullptr) {
                 auto& stats = released[ggml_backend_buffer_get_type(block->buffer)];
                 stats.bytes += ggml_backend_buffer_get_size(block->buffer);

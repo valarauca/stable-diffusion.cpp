@@ -80,19 +80,26 @@ namespace sd {
         return true;
     }
 
-    void ComputeWorkspace::drain() {
-        if (in_flight_) {
-            in_flight_ = false;
+    bool ComputeWorkspace::synchronize_noexcept(const char* phase) const noexcept {
+        try {
             synchronize();
+            return true;
+        } catch (const std::exception& error) {
+            LOG_ERROR("%s workspace synchronization failed during %s: %s",
+                      ggml_backend_name(backend_), phase, error.what());
+        } catch (...) {
+            LOG_ERROR("%s workspace synchronization failed during %s: unknown exception",
+                      ggml_backend_name(backend_), phase);
         }
+        return false;
     }
 
-    bool ComputeWorkspace::reservation_fits(ggml_cgraph* graph) const {
-        ggml_gallocr_t probe = ggml_gallocr_new(ggml_backend_get_default_buffer_type(backend_));
-        size_t size          = 0;
-        ggml_gallocr_reserve_n_size(probe, graph, nullptr, nullptr, &size);
-        ggml_gallocr_free(probe);
-        return size <= ggml_gallocr_get_buffer_size(allocator_, 0);
+    bool ComputeWorkspace::drain() noexcept {
+        if (!in_flight_) {
+            return true;
+        }
+        in_flight_ = false;
+        return synchronize_noexcept("async drain");
     }
 
     void ComputeWorkspace::set_async(bool async) {
@@ -112,7 +119,9 @@ namespace sd {
         GGML_ASSERT(!active_);
         const bool use_scheduler = needs_scheduler(graph);
         if (use_scheduler) {
-            drain();
+            if (!drain()) {
+                return false;
+            }
             if (allocator_ != nullptr) {
                 release();
             }
@@ -141,8 +150,8 @@ namespace sd {
             }
             auto signature = ggml_graph_cut::graph_layout(graph, true);
             if (signature != reservation_) {
-                if (in_flight_ && !reservation_fits(graph)) {
-                    drain();
+                if (!drain()) {
+                    return false;
                 }
                 if (!ggml_gallocr_reserve(allocator_, graph)) {
                     release();
@@ -266,17 +275,7 @@ namespace sd {
             in_flight_ = true;
             return true;
         }
-        try {
-            synchronize();
-            return true;
-        } catch (const std::exception& error) {
-            LOG_ERROR("%s workspace synchronization failed during segment cleanup: %s",
-                      ggml_backend_name(backend_), error.what());
-        } catch (...) {
-            LOG_ERROR("%s workspace synchronization failed during segment cleanup: unknown exception",
-                      ggml_backend_name(backend_));
-        }
-        return false;
+        return synchronize_noexcept("segment cleanup");
     }
 
     bool ComputeWorkspace::release() {

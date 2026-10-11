@@ -2391,13 +2391,17 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
     sd::Tensor<float> denoised                    = x_t;
 
     std::unique_ptr<sd::GpuSampler> gpu_sampler;
-    bool gpu_resident = false;
-    for (const auto& [key, value] : parse_key_value_args(extra_sample_args, "extra sample arg")) {
+    bool gpu_resident              = false;
+    const KeyValueArgs sample_args = parse_key_value_args(extra_sample_args, "extra sample arg");
+    for (const auto& [key, value] : sample_args) {
         if (key != "gpu_sampler" || value == "0" || value == "off") {
             continue;
         }
-        const bool io_only = value == "io";
-        const char* reason = nullptr;
+        const bool io_only       = value == "io";
+        const bool wang_noise    = !io_only && method == EULER_A_SAMPLE_METHOD;
+        const auto noise_sampler = std::find_if(sample_args.begin(), sample_args.end(),
+                                                [](const auto& arg) { return arg.first == "noise_sampler"; });
+        const char* reason       = nullptr;
         if (!io_only && method != EULER_SAMPLE_METHOD && method != EULER_A_SAMPLE_METHOD) {
             reason = "only euler and euler_a are supported";
         } else if (std::dynamic_pointer_cast<SefiFlowDenoiser>(denoiser)) {
@@ -2417,10 +2421,17 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             reason = "the diffusion model does not support device I/O";
         } else if (work_diffusion_model->device_io_backend() == nullptr) {
             reason = "the diffusion model spans several devices";
+        } else if (!sd::GpuSampler::supported(work_diffusion_model->device_io_backend())) {
+            reason = "the backend does not run the sampler ops";
+        } else if (wang_noise && noise_sampler != sample_args.end() && noise_sampler->second != "wang") {
+            reason = "euler_a on the device draws WangHash noise, so noise_sampler must be wang or unset";
         }
         if (reason != nullptr) {
             LOG_WARN("gpu_sampler disabled: %s", reason);
             break;
+        }
+        if (wang_noise && noise_sampler == sample_args.end()) {
+            LOG_INFO("gpu_sampler: euler_a draws WangHash noise, pass noise_sampler=wang for the same noise on the host");
         }
         gpu_sampler = std::make_unique<sd::GpuSampler>(work_diffusion_model->device_io_backend(), x_t,
                                                        !io_only && apply_denoise_mask, static_cast<int>(steps));
@@ -2869,12 +2880,6 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
     }
 
     auto x0 = std::move(x0_opt);
-    if (const char* dump_path = std::getenv("SD_DUMP_LATENT")) {
-        if (FILE* dump = std::fopen(dump_path, "wb")) {
-            std::fwrite(x0.data(), sizeof(float), static_cast<size_t>(x0.numel()), dump);
-            std::fclose(dump);
-        }
-    }
     sd_sample::log_sample_cache_summary(cache_runtime, steps);
     if (inverse_noise_scaling) {
         x0 = denoiser->inverse_noise_scaling(sigmas[sigmas.size() - 1], x0);

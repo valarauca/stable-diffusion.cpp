@@ -81,22 +81,21 @@ namespace sd {
         return result;
     }
 
+    // ggml ne for an sd::Tensor shape of up to 5 dims. A 5th dim is folded into ne[3].
+    inline std::vector<int64_t> ggml_ne_from_shape(const std::vector<int64_t>& shape) {
+        std::vector<int64_t> ne(shape.begin(), shape.begin() + std::min<size_t>(shape.size(), GGML_MAX_DIMS));
+        if (shape.size() == 5) {
+            ne[3] *= shape[4];
+        }
+        return ne;
+    }
+
     template <typename T>
     inline ggml_tensor* make_ggml_tensor(ggml_context* ctx, const Tensor<T>& tensor, bool copy_data = true) {
         GGML_ASSERT(tensor.dim() > 0 && tensor.dim() <= 5);
 
-        int n_dims = std::min(static_cast<int>(tensor.dim()), GGML_MAX_DIMS);
-
-        std::array<int64_t, GGML_MAX_DIMS> ne = {1, 1, 1, 1};
-        for (int64_t i = 0; i < n_dims; ++i) {
-            ne[static_cast<size_t>(i)] = tensor.shape()[static_cast<size_t>(i)];
-        }
-
-        if (tensor.dim() == 5) {
-            ne[3] *= tensor.shape()[4];
-        }
-
-        ggml_tensor* result = ggml_new_tensor(ctx, GGMLTypeTraits<T>::type, n_dims, ne.data());
+        const std::vector<int64_t> ne = ggml_ne_from_shape(tensor.shape());
+        ggml_tensor* result           = ggml_new_tensor(ctx, GGMLTypeTraits<T>::type, static_cast<int>(ne.size()), ne.data());
         if (copy_data && tensor.numel() > 0) {
             std::memcpy(result->data, tensor.data(), static_cast<size_t>(ggml_nbytes(result)));
         }
