@@ -111,6 +111,7 @@ const char* model_version_to_str[] = {
     "Ming-Image",
     "Z-Image L2P",
     "Iris-3B",
+    "Flux.3 Image Klein",
 };
 
 static_assert(VERSION_COUNT == sizeof(model_version_to_str) / sizeof(model_version_to_str[0]),
@@ -1411,6 +1412,9 @@ bool StableDiffusionGGML::build_denoiser() {
             } else {
                 default_flow_shift = 3.f;
             }
+        } else if (sd_version_is_flux3(version)) {
+            pred_type          = FLUX_FLOW_PRED;
+            default_flow_shift = 6.93f;
         } else if (sd_version_is_flux(version) ||
                    sd_version_is_flux2(version) ||
                    sd_version_is_longcat(version) ||
@@ -1476,7 +1480,11 @@ bool StableDiffusionGGML::build_denoiser() {
         }
         case FLUX_FLOW_PRED: {
             LOG_INFO("running in Flux FLOW mode");
-            denoiser = std::make_shared<FluxFlowDenoiser>();
+            if (sd_version_is_flux3(version)) {
+                denoiser = std::make_shared<Flux3FlowDenoiser>();
+            } else {
+                denoiser = std::make_shared<FluxFlowDenoiser>();
+            }
             break;
         }
         case SEFI_FLOW_PRED: {
@@ -2500,6 +2508,13 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
         if (sd_version_is_hunyuan_video(version) && step + 1 < sigmas.size()) {
             hunyuan_timestep_r_tensor = sd::Tensor<float>::from_vector({sigmas[step + 1]});
         }
+        sd::Tensor<float> flux3_target_timestep;
+        if (version == VERSION_FLUX3) {
+            // The sign marks intermediate evaluations; the magnitude is the one-based step.
+            const size_t target_index = static_cast<size_t>(std::abs(step));
+            GGML_ASSERT(target_index > 0 && target_index < sigmas.size());
+            flux3_target_timestep = sd::Tensor<float>::from_vector({sigmas[target_index]});
+        }
         if (gpu_sampler) {
             if (!gpu_resident) {
                 gpu_sampler->upload_x(x);
@@ -2582,6 +2597,8 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             } else if (sd_version_is_flux(version) || sd_version_is_flux2(version) || sd_version_is_longcat(version) || sd_version_is_sefi_image(version)) {
                 diffusion_params.extra = FluxDiffusionExtra{&guidance_tensor,
                                                             local_skip_layers};
+            } else if (sd_version_is_flux3(version)) {
+                diffusion_params.extra = Flux3DiffusionExtra{flux3_target_timestep.empty() ? nullptr : &flux3_target_timestep};
             } else if (version == VERSION_QWEN_IMAGE_2_1) {
                 diffusion_params.extra = QwenImage21DiffusionExtra{&condition.c_token_types};
             } else if (sd_version_is_anima(version)) {
@@ -3112,6 +3129,8 @@ std::string StableDiffusionGGML::get_default_ref_image_preset(SDVersion version)
         return "longcat";
     } else if (sd_version_is_flux(version)) {
         return "flux_kontext";
+    } else if (sd_version_is_flux3(version)) {
+        return "flux2";
     } else if (sd_version_is_flux2(version) || sd_version_is_sefi_image(version)) {
         return "flux2";
     } else if (version == VERSION_QWEN_IMAGE_LAYERED) {
