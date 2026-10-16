@@ -78,6 +78,11 @@ namespace sd {
         ggml_backend_tensor_set(init_, init.data(), 0, ggml_nbytes(init_));
     }
 
+    void GpuSampler::upload_pred(Slot slot, const Tensor<float>& pred) {
+        GGML_ASSERT(pred.numel() == ggml_nelements(pred_[slot]));
+        ggml_backend_tensor_set(pred_[slot], pred.data(), 0, ggml_nbytes(pred_[slot]));
+    }
+
     void GpuSampler::set_c_in(float c_in) {
         c_in_ = scalar({1}, &c_in);
     }

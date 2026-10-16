@@ -16,7 +16,8 @@
 namespace sd {
 
     // Keeps the latent, the model predictions and the sampler state on one backend for a whole
-    // sampling run. Diffusion runners read x and write predictions through set_device_io, and a
+    // sampling run. Diffusion runners read x and write predictions through set_device_io, or through
+    // download and upload_pred when they only take host tensors, and a
     // small graph of GGML_OP_DENOISE + GGML_OP_SAMPLE_STEP advances x in place each step. Run
     // constants and per-call scalars are served as RunnerDeviceInputs, so nothing waits on the
     // backend until the final download.
@@ -45,6 +46,7 @@ namespace sd {
 
         void upload_x(const Tensor<float>& x);
         void upload_mask(const Tensor<float>& mask, const Tensor<float>& init);
+        void upload_pred(Slot slot, const Tensor<float>& pred);
         void set_c_in(float c_in);
         Tensor<float> download(const ggml_tensor* tensor) const;
 

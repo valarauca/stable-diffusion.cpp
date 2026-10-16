@@ -2400,6 +2400,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
 
     std::unique_ptr<sd::GpuSampler> gpu_sampler;
     bool gpu_resident              = false;
+    bool gpu_bridged               = false;
     const KeyValueArgs sample_args = parse_key_value_args(extra_sample_args, "extra sample arg");
     for (const auto& [key, value] : sample_args) {
         if (key != "gpu_sampler" || value == "0" || value == "off") {
@@ -2425,7 +2426,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             reason = "generation extensions are enabled";
         } else if (preview.callback != nullptr && preview.mode != PREVIEW_NONE) {
             reason = "latent preview is enabled";
-        } else if (!work_diffusion_model->supports_device_io()) {
+        } else if (io_only && !work_diffusion_model->supports_device_io()) {
             reason = "the diffusion model does not support device I/O";
         } else if (work_diffusion_model->device_io_backend() == nullptr) {
             reason = "the diffusion model spans several devices";
@@ -2448,11 +2449,14 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             break;
         }
         gpu_resident = !io_only;
+        gpu_bridged  = gpu_resident && !work_diffusion_model->supports_device_io();
         if (gpu_resident && apply_denoise_mask) {
             gpu_sampler->upload_mask(sd::Tensor<float>(x_t.shape()) + denoise_mask, sampling_init_latent);
         }
-        LOG_INFO("gpu_sampler: %s on %s", gpu_resident ? "latent resident" : "device I/O only",
-                 ggml_backend_name(work_diffusion_model->device_io_backend()));
+        const char* mode = gpu_bridged    ? "latent resident, model I/O bridged through host"
+                           : gpu_resident ? "latent resident"
+                                          : "device I/O only";
+        LOG_INFO("gpu_sampler: %s on %s", mode, ggml_backend_name(work_diffusion_model->device_io_backend()));
     }
     std::array<float, 4> gpu_p_denoise = {1.f, 1.f, 1.f, 1.f};
     bool gpu_has_uncond                = false;
@@ -2515,13 +2519,15 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             GGML_ASSERT(target_index > 0 && target_index < sigmas.size());
             flux3_target_timestep = sd::Tensor<float>::from_vector({sigmas[target_index]});
         }
-        if (gpu_sampler) {
+        if (gpu_sampler && !gpu_bridged) {
             if (!gpu_resident) {
                 gpu_sampler->upload_x(x);
             }
             gpu_sampler->set_c_in(c_in);
         }
-        sd::Tensor<float> noised_input = gpu_resident ? x : x * c_in;
+        sd::Tensor<float> noised_input = gpu_bridged    ? gpu_sampler->download(gpu_sampler->x()) * c_in
+                                         : gpu_resident ? x
+                                                        : x * c_in;
         if (apply_denoise_mask && (version == VERSION_WAN2_2_TI2V || sd_version_is_ltxav(version) || sd_version_is_lingbot_video(version))) {
             noised_input = noised_input * denoise_mask + sampling_init_latent * (1.0f - denoise_mask);
         }
@@ -2688,7 +2694,7 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
             const sd::GpuSampler::Slot gpu_slot = &condition == &uncond       ? sd::GpuSampler::UNCOND
                                                   : &condition == &img_uncond ? sd::GpuSampler::IMG_UNCOND
                                                                               : sd::GpuSampler::COND;
-            if (gpu_sampler) {
+            if (gpu_sampler && !gpu_bridged) {
                 work_diffusion_model->set_device_io(gpu_sampler->x(), gpu_sampler->c_in(), gpu_sampler->pred(gpu_slot),
                                                     gpu_resident ? gpu_sampler.get() : nullptr);
             }
@@ -2698,6 +2704,9 @@ sd::Tensor<float> StableDiffusionGGML::sample(const std::shared_ptr<DiffusionMod
                 if (!output_opt.empty()) {
                     output_opt = gpu_sampler->download(gpu_sampler->pred(gpu_slot));
                 }
+            }
+            if (gpu_bridged && !output_opt.empty()) {
+                gpu_sampler->upload_pred(gpu_slot, output_opt);
             }
             if (output_opt.empty()) {
                 LOG_ERROR("diffusion model compute failed");
