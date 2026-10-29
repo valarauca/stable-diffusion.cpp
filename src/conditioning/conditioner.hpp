@@ -1755,6 +1755,32 @@ struct MiniT2IConditioner : public Conditioner {
     }
 };
 
+// Returns a fixed precomputed text embedding for models that ship one
+// instead of a text encoder (SeedVR2).
+struct PrecomputedTextConditioner : public Conditioner {
+    sd::Tensor<float> embedding;
+
+    explicit PrecomputedTextConditioner(sd::Tensor<float> embedding)
+        : embedding(std::move(embedding)) {}
+
+    SDCondition get_learned_condition(int n_threads,
+                                      const ConditionerParams& conditioner_params) override {
+        SD_UNUSED(n_threads);
+        SD_UNUSED(conditioner_params);
+        SDCondition condition;
+        condition.c_crossattn = embedding;
+        return condition;
+    }
+
+    void get_param_tensors(std::map<std::string, ggml_tensor*>& tensors) override {
+        SD_UNUSED(tensors);
+    }
+
+    void set_flash_attention_enabled(bool enabled) override {
+        SD_UNUSED(enabled);
+    }
+};
+
 struct SenseNovaU1Conditioner : public Conditioner {
     static constexpr size_t kMaxPromptTokens = 12288;
     SenseNovaU1Tokenizer tokenizer;

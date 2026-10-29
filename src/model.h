@@ -67,6 +67,7 @@ enum SDVersion {
     VERSION_Z_IMAGE_L2P,
     VERSION_IRIS,
     VERSION_FLUX3,
+    VERSION_SEEDVR2,
     VERSION_COUNT,
 };
 
@@ -139,6 +140,10 @@ static inline bool sd_version_is_ltxav(SDVersion version) {
 
 static inline bool sd_version_is_minimax_h3(SDVersion version) {
     return version == VERSION_MINIMAX_H3;
+}
+
+static inline bool sd_version_is_seedvr2(SDVersion version) {
+    return version == VERSION_SEEDVR2;
 }
 
 static inline bool sd_version_is_wan(SDVersion version) {
@@ -270,7 +275,7 @@ static inline bool sd_version_is_pixart(SDVersion version) {
 }
 
 static inline bool sd_version_supports_video_generation(SDVersion version) {
-    return version == VERSION_SVD || sd_version_is_wan(version) || sd_version_is_hunyuan_video(version) || sd_version_is_lingbot_video(version) || sd_version_is_ltxav(version) || sd_version_is_minimax_h3(version);
+    return version == VERSION_SVD || sd_version_is_wan(version) || sd_version_is_hunyuan_video(version) || sd_version_is_lingbot_video(version) || sd_version_is_ltxav(version) || sd_version_is_minimax_h3(version) || sd_version_is_seedvr2(version);
 }
 
 static inline bool sd_version_supports_image_generation(SDVersion version) {

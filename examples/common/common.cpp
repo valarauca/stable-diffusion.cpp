@@ -451,6 +451,11 @@ ArgOptions SDContextParams::get_options() {
          0,
          &embeddings_connectors_path},
         {"",
+         "--text-embedding",
+         "path to a precomputed text embedding tensor (.pt or .safetensors), e.g. SeedVR2 pos_emb.pt",
+         0,
+         &text_embedding_path},
+        {"",
          "--vae",
          "path to standalone vae model",
          0,
@@ -920,6 +925,7 @@ std::string SDContextParams::to_string() const {
         << "  high_noise_diffusion_model_path: \"" << high_noise_diffusion_model_path << "\",\n"
         << "  uncond_diffusion_model_path: \"" << uncond_diffusion_model_path << "\",\n"
         << "  embeddings_connectors_path: \"" << embeddings_connectors_path << "\",\n"
+        << "  text_embedding_path: \"" << text_embedding_path << "\",\n"
         << "  vae_path: \"" << vae_path << "\",\n"
         << "  vae_format: \"" << vae_format << "\",\n"
         << "  audio_vae_path: \"" << audio_vae_path << "\",\n"
@@ -989,6 +995,7 @@ sd_ctx_params_t SDContextParams::to_sd_ctx_params_t(bool taesd_preview) {
     sd_ctx_params.high_noise_diffusion_model_path = high_noise_diffusion_model_path.c_str();
     sd_ctx_params.uncond_diffusion_model_path     = uncond_diffusion_model_path.c_str();
     sd_ctx_params.embeddings_connectors_path      = embeddings_connectors_path.c_str();
+    sd_ctx_params.text_embedding_path             = text_embedding_path.c_str();
     sd_ctx_params.vae_path                        = vae_path.c_str();
     sd_ctx_params.audio_vae_path                  = audio_vae_path.c_str();
     sd_ctx_params.audio_encoder_path              = audio_encoder_path.c_str();
@@ -1731,7 +1738,7 @@ ArgOptions SDGenerationParams::get_options() {
          on_ref_image_arg},
         {"",
          "--ref-video",
-         "MiniMax-H3 Ref2VA reference video frame directory at 24 fps (can be used multiple times)",
+         "MiniMax-H3 Ref2VA reference video frame directory at 24 fps, or the SeedVR2 video to restore (can be used multiple times)",
          on_ref_video_arg},
         {"",
          "--ref-video-audio",

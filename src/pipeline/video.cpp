@@ -16,6 +16,7 @@
 #include "request.h"
 #include "runtime/denoiser.hpp"
 #include "runtime/image_preprocess.h"
+#include "seedvr2.h"
 
 namespace sd::pipeline {
 
@@ -1546,6 +1547,11 @@ namespace sd::pipeline {
                 *fps_out = std::max(1, sd_vid_gen_params->fps);
             }
             return generate_animatediff_video(sd, sd_vid_gen_params, frames_out, num_frames_out);
+        }
+
+        if (sd_version_is_seedvr2(sd->version)) {
+            sd->reset_cancel_flag();
+            return restore_seedvr2_video(sd, sd_vid_gen_params, frames_out, num_frames_out, audio_out, fps_out);
         }
 
         sd->reset_cancel_flag();

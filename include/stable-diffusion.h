@@ -250,6 +250,7 @@ typedef struct {
     const char* tokenizer;           // tokenizer.json path or main=FILE,clip-l=FILE,clip-g=FILE assignments; required for PiD and Lens
     bool sage_attn;
     int conditioning_cache_size;  // Maximum cached conditioning entries per context; 0 disables caching (default: 4)
+    const char* text_embedding_path;  // Precomputed text conditioning tensor (.pt or .safetensors); required for SeedVR2
 } sd_ctx_params_t;
 
 typedef struct {

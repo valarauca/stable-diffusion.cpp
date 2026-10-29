@@ -370,6 +370,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              "high_noise_diffusion_model_path: %s\n"
              "uncond_diffusion_model_path: %s\n"
              "embeddings_connectors_path: %s\n"
+             "text_embedding_path: %s\n"
              "vae_path: %s\n"
              "audio_vae_path: %s\n"
              "audio_encoder_path: %s\n"
@@ -411,6 +412,7 @@ char* sd_ctx_params_to_str(const sd_ctx_params_t* sd_ctx_params) {
              SAFE_STR(sd_ctx_params->high_noise_diffusion_model_path),
              SAFE_STR(sd_ctx_params->uncond_diffusion_model_path),
              SAFE_STR(sd_ctx_params->embeddings_connectors_path),
+             SAFE_STR(sd_ctx_params->text_embedding_path),
              SAFE_STR(sd_ctx_params->vae_path),
              SAFE_STR(sd_ctx_params->audio_vae_path),
              SAFE_STR(sd_ctx_params->audio_encoder_path),

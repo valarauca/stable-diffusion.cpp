@@ -83,6 +83,7 @@ API and command-line option may change frequently.***
     - [LTX-2.3/LTX-2.5](./docs/ltx2.md)
     - [HunyuanVideo 1.5](./docs/hunyuan_video.md)
     - [LingBot-Video](./docs/lingbot_video.md)
+    - [SeedVR2 video restoration](./docs/seedvr2.md)
   - [PhotoMaker](./docs/photo_maker.md) support.
   - [IP-Adapter](./docs/ip_adapter.md) support (SD 1.5 and SDXL, including Plus)
   - Control Net support with SD 1.5

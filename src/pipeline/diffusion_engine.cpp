@@ -112,6 +112,7 @@ const char* model_version_to_str[] = {
     "Z-Image L2P",
     "Iris-3B",
     "Flux.3 Image Klein",
+    "SeedVR2",
 };
 
 static_assert(VERSION_COUNT == sizeof(model_version_to_str) / sizeof(model_version_to_str[0]),

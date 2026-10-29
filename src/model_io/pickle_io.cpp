@@ -616,7 +616,14 @@ bool parse_torch_state_dict_pickle(const uint8_t* buffer,
                     return false;
                 }
                 size_t old_tensor_count = tensor_storages.size();
-                collect_tensors_from_pickle_value(stack.back(), tensor_storages);
+                if (stack.back().kind == PickleValue::TENSOR) {
+                    TensorStorage tensor_storage = stack.back().tensor.tensor_storage;
+                    tensor_storage.name          = "tensor";
+                    tensor_storage.reverse_ne();
+                    tensor_storages.push_back(tensor_storage);
+                } else {
+                    collect_tensors_from_pickle_value(stack.back(), tensor_storages);
+                }
                 if (tensor_storages.size() == old_tensor_count) {
                     set_error(error, "torch pickle does not contain a supported state_dict");
                     return false;

@@ -35,12 +35,13 @@ namespace SeedVR2 {
 
         static SeedVR2Config detect_from_weights(const String2TensorStorage& tensor_storage_map, const std::string& prefix) {
             SeedVR2Config config;
-            config.num_layers = 0;
+            config.num_layers       = 0;
+            const std::string scope = prefix.empty() ? "" : prefix + ".";
             for (const auto& [name, storage] : tensor_storage_map) {
-                if (!starts_with(name, prefix)) {
+                if (!starts_with(name, scope)) {
                     continue;
                 }
-                const std::string key = name.substr(prefix.size());
+                const std::string key = name.substr(scope.size());
                 if (starts_with(key, "blocks.")) {
                     auto items = split_string(key, '.');
                     if (items.size() > 1) {
@@ -446,6 +447,8 @@ namespace SeedVR2 {
             : DiffusionModelRunner(backend, prefix, weight_manager),
               config(SeedVR2Config::detect_from_weights(tensor_storage_map, prefix)),
               model(config) {
+            LOG_INFO("SeedVR2 DiT: %d blocks, hidden %lld, %lld heads",
+                     config.num_layers, (long long)config.hidden_size, (long long)config.num_heads);
             model.init(params_ctx, tensor_storage_map, prefix);
         }
 

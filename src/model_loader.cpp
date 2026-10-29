@@ -443,6 +443,11 @@ SDVersion ModelLoader::get_sd_version() const {
         return VERSION_FLUX3;
     }
 
+    if (tensor_storage_map.find("model.diffusion_model.blocks.0.ada.vid.attn_gate") != tensor_storage_map.end() &&
+        tensor_storage_map.find("model.diffusion_model.vid_in.proj.weight") != tensor_storage_map.end()) {
+        return VERSION_SEEDVR2;
+    }
+
     bool has_multiple_encoders = false;
     bool is_unet               = false;
 

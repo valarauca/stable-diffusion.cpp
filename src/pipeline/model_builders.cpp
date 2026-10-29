@@ -35,6 +35,7 @@
 #include "model/diffusion/pixart.hpp"
 #include "model/diffusion/qwen_image.hpp"
 #include "model/diffusion/qwen_image_2_1.hpp"
+#include "model/diffusion/seedvr2.hpp"
 #include "model/diffusion/sensenova_u1.h"
 #include "model/diffusion/unet.hpp"
 #include "model/diffusion/wan.hpp"
@@ -47,6 +48,7 @@
 #include "model/vae/mage_vae.hpp"
 #include "model/vae/minimax_h3_audio_vae.hpp"
 #include "model/vae/minimax_h3_vae.hpp"
+#include "model/vae/seedvr2_vae.hpp"
 #include "model/vae/tae.hpp"
 #include "model/vae/vae.hpp"
 #include "model/vae/wan_vae.hpp"
@@ -62,6 +64,29 @@ namespace sd::model_builders {
             LOG_ERROR("failed to initialize %s params backend", sd_backend_module_name(module));
             return false;
         }
+        return true;
+    }
+
+    // Loads the single 2D tensor stored in path, a torch.save(tensor) .pt or a
+    // one-tensor safetensors/gguf file, as [hidden, tokens].
+    static bool load_text_embedding(const std::string& path, sd::Tensor<float>& embedding) {
+        ModelLoader loader;
+        if (path.empty() || !loader.init_from_file(path)) {
+            LOG_ERROR("failed to load text embedding from '%s'", path.c_str());
+            return false;
+        }
+        const auto& tensors = loader.get_tensor_storage_map();
+        if (tensors.size() != 1 || tensors.begin()->second.n_dims != 2) {
+            LOG_ERROR("text embedding '%s' must hold exactly one 2D tensor", path.c_str());
+            return false;
+        }
+        const auto& storage = tensors.begin()->second;
+        std::vector<float> data;
+        if (!loader.load_float_tensor(tensors.begin()->first, data)) {
+            LOG_ERROR("failed to read text embedding '%s'", path.c_str());
+            return false;
+        }
+        embedding = sd::Tensor<float>({storage.ne[0], storage.ne[1]}, std::move(data));
         return true;
     }
 
@@ -205,6 +230,21 @@ namespace sd::model_builders {
                                                                    tensor_storage_map,
                                                                    "model.diffusion_model",
                                                                    weight_manager);
+        } else if (sd_version_is_seedvr2(version)) {
+            if (tensor_storage_map.count("model.diffusion_model.vid_out_norm.weight") > 0) {
+                LOG_ERROR("SeedVR2 3B is not supported yet, use the 7B checkpoint");
+                return false;
+            }
+            sd::Tensor<float> embedding;
+            if (!load_text_embedding(SAFE_STR(sd_ctx_params->text_embedding_path), embedding)) {
+                LOG_ERROR("SeedVR2 needs --text-embedding pointing at its pos_emb.pt");
+                return false;
+            }
+            result.conditioner = std::make_shared<PrecomputedTextConditioner>(std::move(embedding));
+            result.diffusion   = std::make_shared<SeedVR2::SeedVR2Runner>(ctx.backends.runtime_backend(SDBackendModule::DIFFUSION),
+                                                                          tensor_storage_map,
+                                                                          "model.diffusion_model",
+                                                                          weight_manager);
         } else if (sd_version_is_minimax_h3(version)) {
             result.conditioner = std::make_shared<LLMEmbedder>(ctx.backends.runtime_backend(SDBackendModule::TE),
                                                                tensor_storage_map,
@@ -576,6 +616,12 @@ namespace sd::model_builders {
                                                      false,
                                                      version,
                                                      weight_manager);
+            } else if (sd_version_is_seedvr2(version)) {
+                return std::make_shared<SeedVR2VAE::SeedVR2VAERunner>(ctx.backends.runtime_backend(SDBackendModule::VAE),
+                                                                      tensor_storage_map,
+                                                                      "first_stage_model",
+                                                                      version,
+                                                                      weight_manager);
             } else if (sd_version_is_minimax_h3(version)) {
                 return std::make_shared<MiniMaxH3VAE::MiniMaxH3VideoVAERunner>(ctx.backends.runtime_backend(SDBackendModule::VAE),
                                                                                tensor_storage_map,
